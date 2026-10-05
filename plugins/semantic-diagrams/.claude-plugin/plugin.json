@@ -1,0 +1,9 @@
+{
+  "name": "semantic-diagrams",
+  "version": "1.1.0",
+  "description": "Ownership-aware architecture, migration, and before/after diagrams in Mermaid — named owner boundaries, fixed status colours and legend, rendered to a local HTML page and published as an Artifact on demand",
+  "author": {
+    "name": "Ari Encarnacion",
+    "email": "ari.encarnacion.95@gmail.com"
+  }
+}

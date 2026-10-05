@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TITLE</title>
+<style>
+:root{
+  --bg:#fbfaf7;--fg:#1f2328;--muted:#6b7280;--rule:#e5e3dc;
+  --mm-node:#ffffff;--mm-node-border:#9ca3af;--mm-text:#111827;--mm-line:#6b7280;
+  --mm-cluster:#f5f4f0;--mm-cluster-border:#d4d4d8;--mm-edge-label:#fbfaf7;
+  --st-unchanged:#dcfce7;--st-unchanged-border:#16a34a;
+  --st-new:#dbeafe;--st-new-border:#2563eb;
+  --st-changed:#ffedd5;--st-changed-border:#ea580c;
+  --st-removed:#fee2e2;--st-removed-border:#dc2626;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#15171b;--fg:#e6e6e3;--muted:#9aa0a6;--rule:#2c3036;
+  --mm-node:#23262b;--mm-node-border:#4b5563;--mm-text:#e6e6e3;--mm-line:#9aa0a6;
+  --mm-cluster:#1b1e23;--mm-cluster-border:#3a3f47;--mm-edge-label:#15171b;
+  --st-unchanged:#163a25;--st-unchanged-border:#4ade80;
+  --st-new:#172554;--st-new-border:#60a5fa;
+  --st-changed:#431407;--st-changed-border:#fb923c;
+  --st-removed:#450a0a;--st-removed-border:#f87171;
+}}
+:root[data-theme="dark"]{
+  --bg:#15171b;--fg:#e6e6e3;--muted:#9aa0a6;--rule:#2c3036;
+  --mm-node:#23262b;--mm-node-border:#4b5563;--mm-text:#e6e6e3;--mm-line:#9aa0a6;
+  --mm-cluster:#1b1e23;--mm-cluster-border:#3a3f47;--mm-edge-label:#15171b;
+  --st-unchanged:#163a25;--st-unchanged-border:#4ade80;
+  --st-new:#172554;--st-new-border:#60a5fa;
+  --st-changed:#431407;--st-changed-border:#fb923c;
+  --st-removed:#450a0a;--st-removed-border:#f87171;
+}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:1200px;padding-block:32px;padding-inline:16px}
+h1{font-size:1.4rem;margin:0 0 4px}
+p{color:var(--muted);margin:0 0 24px;max-width:65ch}
+h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:32px 0 8px;border-top:1px solid var(--rule);padding-top:16px}
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;width:fit-content;list-style:none;margin:0 0 8px;padding:10px 14px;border:1px solid var(--rule);border-radius:8px}
+.legend[hidden]{display:none}
+.legend li{display:flex;align-items:center;gap:8px}
+.legend li::before{content:"";width:14px;height:14px;border-radius:3px;border:2px solid}
+.legend .unchanged::before{background:var(--st-unchanged);border-color:var(--st-unchanged-border)}
+.legend .new::before{background:var(--st-new);border-color:var(--st-new-border)}
+.legend .changed::before{background:var(--st-changed);border-color:var(--st-changed-border)}
+.legend .removed::before{background:var(--st-removed);border-color:var(--st-removed-border)}
+div.mermaid{overflow-x:auto}
+div.mermaid svg{max-width:100%;height:auto}
+</style>
+</head>
+<body>
+<h1>TITLE</h1>
+<p>ONE SENTENCE ON WHAT THE READER IS BEING ASKED TO SEE OR DECIDE.</p>
+<ul class="legend" aria-label="Status legend">
+  <li class="unchanged">Unchanged</li>
+  <li class="new">New</li>
+  <li class="changed">Changed</li>
+  <li class="removed">Removed</li>
+</ul>
+
+<h2>Current state</h2>
+<div class="mermaid">
+flowchart LR
+  ...
+</div>
+
+<h2>Proposed state</h2>
+<div class="mermaid">
+flowchart LR
+  ...
+</div>
+
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+const t = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const blocks = [...document.querySelectorAll("div.mermaid")];
+for (const b of blocks) b.dataset.src = b.textContent.replace(/^\s*L1\[.*~~~.*$/gm, "");
+
+async function render() {
+  for (const b of blocks) { b.removeAttribute("data-processed"); b.textContent = b.dataset.src; }
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: {
+      background: "transparent",
+      primaryColor: t("--mm-node"),
+      primaryTextColor: t("--mm-text"),
+      primaryBorderColor: t("--mm-node-border"),
+      lineColor: t("--mm-line"),
+      textColor: t("--mm-text"),
+      clusterBkg: t("--mm-cluster"),
+      clusterBorder: t("--mm-cluster-border"),
+      edgeLabelBackground: t("--mm-edge-label"),
+    },
+  });
+  await mermaid.run({ nodes: blocks });
+  document.querySelector(".legend").hidden =
+    !document.querySelector(".mermaid g.node:is(.unchanged, .new, .changed, .removed)");
+  for (const status of ["unchanged", "new", "changed", "removed"]) {
+    for (const node of document.querySelectorAll(`.mermaid g.node.${status}`)) {
+      for (const shape of node.querySelectorAll("rect, path, polygon")) {
+        shape.style.setProperty("fill", t(`--st-${status}`), "important");
+        shape.style.setProperty("stroke", t(`--st-${status}-border`), "important");
+      }
+      for (const label of node.querySelectorAll(".nodeLabel")) {
+        label.style.setProperty("color", t("--mm-text"), "important");
+      }
+    }
+  }
+}
+
+await render();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>
+</body>
+</html>

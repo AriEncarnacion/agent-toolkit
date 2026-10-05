@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Mod types the engine writes on load
+plugins/*/.claude-plugin/types/
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Local secrets, such as TYPESAFE_API_KEY for dredd
+.env
+.env.local

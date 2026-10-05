@@ -1,0 +1,30 @@
+{
+  "name": "agent-toolkit",
+  "owner": {
+    "name": "Ari Encarnacion",
+    "email": "ari.encarnacion.95@gmail.com"
+  },
+  "metadata": {
+    "description": "Ari Encarnacion's personal Claude Code plugins for open-source and hobby projects"
+  },
+  "plugins": [
+    {
+      "name": "dredd",
+      "source": "./plugins/dredd",
+      "description": "Re-asserts your CLAUDE.md rules with TypeSafe's Jev decision model — holds commands that likely break a hard rule, cites borderline ones, reviews diffs and PRs on demand, and keeps a per-session ledger in a pane",
+      "version": "1.0.0"
+    },
+    {
+      "name": "token-weather",
+      "source": "./plugins/token-weather",
+      "description": "A live forecast of the context window drawn in the band above the prompt — weather icon, percent used, a 12-turn sparkline, and the last turn's change",
+      "version": "1.0.0"
+    },
+    {
+      "name": "semantic-diagrams",
+      "source": "./plugins/semantic-diagrams",
+      "description": "Ownership-aware architecture, migration, and before/after diagrams in Mermaid — named owner boundaries, fixed status colours and legend, rendered to a local HTML page and published as an Artifact on demand",
+      "version": "1.1.0"
+    }
+  ]
+}

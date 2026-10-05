@@ -1,0 +1,10 @@
+{
+  "name": "dredd",
+  "version": "1.0.0",
+  "description": "Re-asserts your CLAUDE.md rules with TypeSafe's Jev decision model — holds commands that likely break a hard rule, cites borderline ones, reviews diffs and PRs on demand, and keeps a per-session ledger in a pane",
+  "author": {
+    "name": "Ari Encarnacion",
+    "email": "ari.encarnacion.95@gmail.com"
+  },
+  "types": "./types/index.d.ts"
+}
