@@ -70,8 +70,11 @@ export type Finding = {
   line?: number
 }
 
-/** One session's ledger as `$.store` keeps it. */
-export type Kept = { startedAt: number; entries: Entry[] }
+/** One session's ledger as `$.store` keeps it, with the project root it ran in. */
+export type Kept = { startedAt: number; root?: string; entries: Entry[] }
+
+/** What `/dredd-rules` saves when it writes the rules file: hashes of the rule docs and of the file. */
+export type Drafted = { docs: string; rules: string }
 
 const R = '[REDACTED]'
 
@@ -585,8 +588,14 @@ export const arrayIn = (text: string): unknown => {
 export const DRAFT_SYSTEM =
   "You turn a software project's agent rules into a JSON rules file for a decision model. Reply with the JSON array alone."
 
-/** The prompt that asks a model to draft the rules file from the project's rule documents. */
-export const draftPrompt = (docs: string) => `Read the project rules below and write a JSON array with one object per rule that can be judged from a single shell command, MCP tool call, or block of added code. Leave out rules about tone, prose, process or anything that needs the whole conversation to judge.
+/**
+ * The prompt that asks a model to draft the rules file from the project's
+ * rule documents. With the current rules file, it asks the model to keep
+ * each rule whose text is still in the documents exactly as it is, id and
+ * tuned question included, so a redraft changes only what the documents
+ * changed.
+ */
+export const draftPrompt = (docs: string, current?: Rule[]) => `Read the project rules below and write a JSON array with one object per rule that can be judged from a single shell command, MCP tool call, or block of added code. Leave out rules about tone, prose, process or anything that needs the whole conversation to judge.
 
 Each object has these fields:
 - "id": a short kebab-case slug, unique.
@@ -596,6 +605,17 @@ Each object has these fields:
 - "hard": true only when the rule is stated as an absolute (must, never, always, under no circumstances); false otherwise.
 - "applies": "command" when it is judged on a shell command or tool call, "code" when it is judged on added code, "both" when either can break it.
 
+${
+  current === undefined
+    ? ''
+    : `
+A rules file already exists. For every rule in it whose "rule" text still appears in the documents, copy that object exactly, with the same id and question. Add objects only for rules that are new in the documents, drop objects whose rule text is gone, and give a rule whose text changed a fresh object under its old id.
+
+Current rules file:
+
+${JSON.stringify(current, null, 2)}
+`
+}
 Project rules:
 
 ${docs}`
@@ -624,8 +644,73 @@ export const toPrune = (
 
 /** The ledger's counts by verdict, for the band and the pane header. */
 export const counts = (entries: Entry[]) => ({
-  held: entries.filter(e => e.verdict === 'held').length,
   violations: entries.filter(e => e.verdict === 'violation').length,
+  allowed: entries.filter(e => e.verdict === 'violation' && e.decision === 'allowed').length,
+  misjudged: entries.filter(e => e.verdict === 'misjudged').length,
   citations: entries.filter(e => e.verdict === 'citation').length,
   unchecked: entries.filter(e => e.verdict === 'unchecked').length,
 })
+
+/** One rule's line in the pane's summary. */
+export type RuleTally = { ruleId: string; violations: number; allowed: number; misjudged: number; hint: string }
+
+/**
+ * How each rule has fared: its violations, how many of those a person
+ * allowed anyway, and how many holds a person said were not violations. A
+ * rule allowed in at least half its violations (twice or more) is too strict
+ * as written; a rule misjudged at least as often as it is broken (twice or
+ * more) has a question Jev misreads. Rules with neither are left out.
+ */
+export const ruleSummary = (entries: Entry[]): RuleTally[] => {
+  const tallies = new Map<string, RuleTally>()
+  for (const e of entries) {
+    if (e.ruleId === undefined || (e.verdict !== 'violation' && e.verdict !== 'misjudged')) continue
+    const t = tallies.get(e.ruleId) ?? { ruleId: e.ruleId, violations: 0, allowed: 0, misjudged: 0, hint: '' }
+    if (e.verdict === 'misjudged') t.misjudged += 1
+    else t.violations += 1
+    if (e.verdict === 'violation' && e.decision === 'allowed') t.allowed += 1
+    tallies.set(e.ruleId, t)
+  }
+  return [...tallies.values()]
+    .map(t => ({
+      ...t,
+      hint:
+        t.allowed >= 2 && t.allowed * 2 >= t.violations
+          ? 'often allowed: soften the rule or add the exception to CLAUDE.md'
+          : t.misjudged >= 2 && t.misjudged >= t.violations
+            ? 'often misjudged: reword the question'
+            : '',
+    }))
+    .sort((x, y) => y.violations + y.misjudged - (x.violations + x.misjudged))
+}
+
+/** A short, stable fingerprint of a text (32-bit FNV-1a, hex), for noticing that a file changed. */
+export const hashText = (text: string) => {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+/** The rule ids a redraft adds, removes, and changes in any field, comparing by id. */
+export const ruleChanges = (before: Rule[], after: Rule[]) => {
+  const old = new Map(before.map(r => [r.id, JSON.stringify(r)]))
+  const ids = new Set(after.map(r => r.id))
+  return {
+    added: after.filter(r => !old.has(r.id)).map(r => r.id),
+    removed: before.filter(r => !ids.has(r.id)).map(r => r.id),
+    changed: after.filter(r => old.has(r.id) && old.get(r.id) !== JSON.stringify(r)).map(r => r.id),
+  }
+}
+
+/** A redraft's changes in one line, such as `added a, b; removed c`. */
+export const describeChanges = (c: ReturnType<typeof ruleChanges>) =>
+  [
+    c.added.length > 0 ? `added ${c.added.join(', ')}` : '',
+    c.removed.length > 0 ? `removed ${c.removed.join(', ')}` : '',
+    c.changed.length > 0 ? `changed ${c.changed.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('; ')

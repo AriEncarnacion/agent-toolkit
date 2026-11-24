@@ -29,6 +29,11 @@ import {
   toPrune,
   unanswered,
   where,
+  describeChanges,
+  draftPrompt,
+  hashText,
+  ruleChanges,
+  ruleSummary,
 } from '../hooks/dredd'
 
 const HARD: Rule = {
@@ -588,11 +593,11 @@ const entry = (id: string, at: number, extra: Partial<Entry> = {}): Entry => ({
 
 test('mergeEntries keeps one entry per id, the newer write winning, in time order', () => {
   const merged = mergeEntries(
-    [entry('a', 1), entry('b', 2, { verdict: 'held' })],
-    [entry('b', 2, { verdict: 'held', decision: 'cancel' }), entry('c', 3)],
+    [entry('a', 1), entry('b', 2, { verdict: 'violation' })],
+    [entry('b', 2, { verdict: 'violation', decision: 'cancelled' }), entry('c', 3)],
   )
   expect(merged.map(e => e.id)).toEqual(['a', 'b', 'c'])
-  expect(merged[1]?.decision).toBe('cancel')
+  expect(merged[1]?.decision).toBe('cancelled')
   expect(mergeEntries([entry('a', 1)], [entry('b', 2)], 1).map(e => e.id)).toEqual(['b'])
 })
 
@@ -605,4 +610,51 @@ test('toPrune keeps the newest sessions within the count and the byte budget', (
   expect(toPrune(sessions, 2)).toEqual(['ledger:old'])
   expect(toPrune(sessions, 50, 25)).toEqual(['ledger:old'])
   expect(toPrune(sessions, 50, 15)).toEqual(['ledger:mid', 'ledger:old'])
+})
+
+test('ruleSummary counts violations, allowed and misjudged per rule, and names the rules that need work', () => {
+  const v = (id: string, rule: string, extra: Partial<Entry> = {}) => entry(id, 1, { verdict: 'violation', ruleId: rule, ...extra })
+  const tallies = ruleSummary([
+    v('1', 'too-strict', { decision: 'allowed' }),
+    v('2', 'too-strict', { decision: 'allowed' }),
+    v('3', 'too-strict', { decision: 'cancelled' }),
+    v('4', 'misread', { verdict: 'misjudged', decision: 'allowed' }),
+    v('5', 'misread', { verdict: 'misjudged', decision: 'allowed' }),
+    v('6', 'misread', { decision: 'cancelled' }),
+    v('7', 'working', { decision: 'cancelled' }),
+    v('8', 'working', { decision: 'allowed' }),
+    v('9', 'working', { decision: 'cancelled' }),
+    v('10', 'working', { decision: 'cancelled' }),
+    entry('11', 1, { verdict: 'citation', ruleId: 'cited-only' }),
+  ])
+  expect(tallies.map(r => [r.ruleId, r.violations, r.allowed, r.misjudged])).toEqual([
+    ['working', 4, 1, 0],
+    ['too-strict', 3, 2, 0],
+    ['misread', 1, 0, 2],
+  ])
+  expect(tallies.find(r => r.ruleId === 'too-strict')?.hint).toMatch(/often allowed/)
+  expect(tallies.find(r => r.ruleId === 'misread')?.hint).toMatch(/often misjudged/)
+  expect(tallies.find(r => r.ruleId === 'working')?.hint).toBe('')
+})
+
+test('hashText is stable and changes with the text', () => {
+  expect(hashText('# Rules')).toBe(hashText('# Rules'))
+  expect(hashText('# Rules')).not.toBe(hashText('# Rules.'))
+  expect(hashText('')).toMatch(/^[0-9a-f]{8}$/)
+})
+
+test('ruleChanges and describeChanges compare a redraft with the current rules by id', () => {
+  const rule = (id: string, question = 'Q?') => ({ id, rule: 'R', question, hard: true, applies: 'command' as const })
+  const changes = ruleChanges([rule('kept'), rule('reworded'), rule('gone')], [rule('kept'), rule('reworded', 'New?'), rule('new')])
+  expect(changes).toEqual({ added: ['new'], removed: ['gone'], changed: ['reworded'] })
+  expect(describeChanges(changes)).toBe('added new; removed gone; changed reworded')
+  expect(describeChanges(ruleChanges([rule('a')], [rule('a')]))).toBe('')
+})
+
+test('draftPrompt asks a redraft to keep unchanged rules exactly', () => {
+  const current = [{ id: 'no-force-push', rule: 'Never force push.', question: 'Does it force push?', hard: true, applies: 'command' as const }]
+  expect(draftPrompt('# Rules')).not.toMatch(/already exists/)
+  const prompt = draftPrompt('# Rules', current)
+  expect(prompt).toMatch(/A rules file already exists/)
+  expect(prompt).toMatch(/"id": "no-force-push"/)
 })

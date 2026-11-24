@@ -12,13 +12,13 @@
       "name": "dredd",
       "source": "./plugins/dredd",
       "description": "Re-asserts your CLAUDE.md rules with TypeSafe's Jev decision model — holds commands that likely break a hard rule, cites borderline ones, reviews diffs and PRs on demand, and keeps a per-session ledger in a pane",
-      "version": "1.0.0"
+      "version": "1.1.0"
     },
     {
       "name": "token-weather",
       "source": "./plugins/token-weather",
       "description": "A live forecast of the context window drawn in the band above the prompt — weather icon, percent used, a 12-turn sparkline, and the last turn's change",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "name": "semantic-diagrams",

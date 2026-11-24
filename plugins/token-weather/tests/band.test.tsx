@@ -37,6 +37,24 @@ test('a turn end updates the forecast line on terminal and desktop', async ($, o
   }
 })
 
+test('the forecast stacks above the bands other mods draw, not over them', async ($, on) => {
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 36100, window: 200000 }, rateLimits: [] },
+  }))
+  on('turn.complete', () => ({ text: '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>another mod's band</Text>
+  })
+
+  await $.turn.complete({ ...TURN, turnId: 't1' })
+
+  const ui = await $.ui.mount({ plugin: 'token-weather', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /18%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /another mod's band/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('the band stays out of the way of a survey', async ($, on) => {
   on('session.usage', () => ({
     value: { startedAt: 0, context: { tokens: 1000, window: 200000 }, rateLimits: [] },

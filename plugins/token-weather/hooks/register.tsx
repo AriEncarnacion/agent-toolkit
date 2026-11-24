@@ -72,12 +72,16 @@ export const register: Register = on => {
 
     const f = forecast(hist)
     const { Box, Text } = $.ui.resolve(e)
+    const below = await next(e)
     return (
-      <Box>
-        <Text color={f.color} bold>{f.icon} {f.word}</Text>
-        <Text>  {f.pct}%  {f.used}  </Text>
-        <Text color={f.color}>{f.chart}</Text>
-        <Text dimColor>  {f.delta}</Text>
+      <Box flexDirection="column">
+        <Box>
+          <Text color={f.color} bold>{f.icon} {f.word}</Text>
+          <Text>  {f.pct}%  {f.used}  </Text>
+          <Text color={f.color}>{f.chart}</Text>
+          <Text dimColor>  {f.delta}</Text>
+        </Box>
+        {below}
       </Box>
     )
   })

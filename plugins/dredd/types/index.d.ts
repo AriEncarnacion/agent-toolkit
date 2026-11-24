@@ -14,8 +14,13 @@ export type Rule = {
   applies: 'command' | 'code' | 'both'
 }
 
-/** What a ledger entry records about an action or a line of a diff. */
-export type Verdict = 'held' | 'violation' | 'citation' | 'unchecked'
+/**
+ * What a ledger entry records about an action or a line of a diff. A
+ * violation is the model acting against a rule that was present: a held
+ * command, or a hard-rule line in a reviewed diff. A misjudged entry is a
+ * held command a person said breaks no rule.
+ */
+export type Verdict = 'violation' | 'misjudged' | 'citation' | 'unchecked'
 
 /** One line of the ledger. */
 export type Entry = {
@@ -28,10 +33,11 @@ export type Entry = {
   ruleId?: string
   p?: number
   kind?: string
-  decision?: 'proceed' | 'cancel'
+  /** For a held command: whether it was cancelled or allowed to run. */
+  decision?: 'cancelled' | 'allowed'
 }
 
-/** A command waiting on Proceed or Cancel. */
+/** A command waiting on Cancel, Allow once or Not a violation. */
 export type Held = {
   id: string
   entryIds: string[]
@@ -39,6 +45,8 @@ export type Held = {
   rule: string
   p: number
   subject: string
+  /** True while the hold is asked in the engine's dialog because the pane could not be shown. */
+  isAsking?: boolean
 }
 
 /** The rules a session enforces, pinned from the file as it stood when the session first read it. */
@@ -52,6 +60,8 @@ declare module 'claude-code' {
       held: Held[]
       notice: string
       pinned: Pinned | null
+      isLedgerOpen: boolean
+      drift: string
     }
   }
 }

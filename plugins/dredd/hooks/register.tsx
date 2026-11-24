@@ -2,19 +2,22 @@
  * dredd: re-asserts the project's CLAUDE.md rules at the moment of action, with
  * TypeSafe's Jev decision model doing the judging.
  *
- * Monitor is a `tool.call` hook on Bash and every MCP tool. It asks Jev one
- * Noul per command rule in `.claude/dredd-rules.json`; a likely break of a
- * hard rule is held in the Dredd pane for Proceed or Cancel, an uncertain one
- * is cited, the rest run. `/dredd-review [PR#]` sends the branch's or a PR's
- * diff in batched requests and reports violations and citations;
- * `/dredd-rules` drafts the rules file once with a model. Every held command,
- * violation and citation goes in the session's ledger, drawn in the pane and
- * counted in the band above the prompt, which carries the on/off toggle, and
- * kept per session in `$.store`.
+ * Every rule Dredd enforces comes from `.claude/dredd-rules.json`, which
+ * `/dredd-rules` drafts from the project's agent rule docs; Dredd has no
+ * rules of its own. Monitor is a `tool.call` hook on Bash and every MCP
+ * tool. It asks Jev one Noul per command rule; a likely break of a hard rule
+ * is a violation, held in the Dredd pane for Cancel, Allow once or Not a
+ * violation, an uncertain one is cited, the rest run. `/dredd-review [PR#]`
+ * sends the branch's or a PR's diff in batched requests and reports
+ * violations and citations. Every violation and citation goes in the
+ * session's ledger, drawn in the pane with a per-rule summary and counted in
+ * the band above the prompt, which carries the on/off toggle, and kept per
+ * session in `$.store`.
  *
  * Monitor is off at the start of every session, `/clear` and resume included,
- * and only a person can turn it on, with the band's button. Both commands run only when a person typed them
- * at the prompt.
+ * and only a person can turn it on, with the band's button. Both commands run
+ * only when a person typed them at the prompt. The band warns when the rule
+ * docs or the rules file changed since `/dredd-rules` last wrote the file.
  */
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -45,6 +48,10 @@ import {
   windows,
   mergeAnswers,
   quoteLine,
+  describeChanges,
+  hashText,
+  ruleChanges,
+  ruleSummary,
   isSecretFile,
   report,
   reviewRequest,
@@ -55,7 +62,7 @@ import {
   unanswered,
   where,
 } from './dredd'
-import type { Answer, Finding, JevRequest, Kept } from './dredd'
+import type { Answer, Drafted, Finding, JevRequest, Kept } from './dredd'
 
 const PANE = 'dredd'
 const RULES_PATH = '.claude/dredd-rules.json'
@@ -69,12 +76,24 @@ const ledger = atom({ plugin: 'dredd', key: 'ledger' } as const, [])
 const held = atom({ plugin: 'dredd', key: 'held' } as const, [])
 const notice = atom({ plugin: 'dredd', key: 'notice' } as const, '')
 const pinned = atom({ plugin: 'dredd', key: 'pinned' } as const, null)
+const isLedgerOpen = atom({ plugin: 'dredd', key: 'isLedgerOpen' } as const, false)
+const drift = atom({ plugin: 'dredd', key: 'drift' } as const, '')
 
-/** Proceed or Cancel, set by the pane's and band's buttons and read by the waiting hook. */
-const decisions = new Map<string, 'proceed' | 'cancel'>()
+/** A person's answer to a hold. */
+type Answer3 = 'cancel' | 'allow' | 'misjudged'
+
+/** The answers to holds, set by the pane's and band's buttons and read by the waiting hook. */
+const decisions = new Map<string, Answer3>()
+
+/** The labels of a hold's three answers, in button order. */
+const ANSWERS: [Answer3, string][] = [
+  ['cancel', 'Cancel'],
+  ['allow', 'Allow once'],
+  ['misjudged', 'Not a violation'],
+]
 
 /**
- * Calls whose hold has begun and not ended in Proceed: if the hook fails from
+ * Calls whose hold has begun and not ended in a run: if the hook fails from
  * here on, the `.catch` refuses the command rather than running it.
  */
 const failClosed = new Set<string>()
@@ -97,6 +116,19 @@ const typedOnly = (name: string) => ({ text: `/${name} runs only when you type i
 
 /** An error's message, for text shown to the person. */
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+/** Opens the Dredd pane and records whether it is shown, for the band's Ledger button. */
+const openPane = async ($: EngineInterface, isFocused = false) => {
+  const opened = await $.ui.open({ id: PANE, title: 'Dredd', ...(isFocused ? { focus: true } : {}) })
+  if (opened.isPlaced) await update($, isLedgerOpen, () => true)
+  return opened
+}
+
+/** Closes the Dredd pane. A close by the person is recorded by the `ui.close` hook. */
+const closePane = async ($: EngineInterface) => {
+  await $.ui.close({ id: PANE })
+  await update($, isLedgerOpen, () => false)
+}
 
 /** Sets the band's notice, writing only when it changed. */
 const say = async ($: EngineInterface, text: string) => {
@@ -265,6 +297,7 @@ const flush = async ($: EngineInterface) => {
       if (stored === undefined) await prune($)
       const kept: Kept = {
         startedAt: stored?.startedAt ?? mine[0]!.at,
+        root: await $.session.root(),
         entries: mergeEntries(stored?.entries ?? [], mine),
       }
       await $.store.set(key, kept)
@@ -272,6 +305,56 @@ const flush = async ($: EngineInterface) => {
   } catch (err) {
     $.ui.log(`dredd: the ledger was not saved: ${messageOf(err)}`, { to: 'debug' })
   }
+}
+
+/** Each session's entries as saved in `$.store`, read the first time this run of the module draws it. */
+const saved = new Map<string, Entry[]>()
+
+/**
+ * The current session's ledger entries: what it saved to `$.store` before,
+ * merged with what is in `$.state` now, so a resumed conversation shows what
+ * it recorded earlier. A brand-new session has nothing saved and starts
+ * empty. Drawing may not write state, so the merge is for display only; the
+ * store already holds the saved entries.
+ */
+const sessionLedger = async ($: EngineInterface) => {
+  const session = await $.session.id()
+  if (!saved.has(session)) {
+    let entries: Entry[] = []
+    try {
+      entries = ((await $.store.get(`ledger:${session}`)) as Kept | undefined)?.entries ?? []
+    } catch (err) {
+      $.ui.log(`dredd: the saved ledger was not read: ${messageOf(err)}`, { to: 'debug' })
+    }
+    saved.set(session, entries)
+  }
+  return mergeEntries(saved.get(session)!, (await read($, ledger)).filter(x => x.session === session))
+}
+
+/** Every entry `$.store` kept for each project root, read once per run of the module. */
+const history = new Map<string, Entry[]>()
+
+/**
+ * Every ledger entry recorded in this project: all sessions kept in
+ * `$.store` with this root, merged with this run's entries in `$.state`.
+ * The pane's per-rule summary is drawn from it, so a pattern across
+ * sessions shows.
+ */
+const projectLedger = async ($: EngineInterface) => {
+  const root = await $.session.root()
+  if (!history.has(root)) {
+    const entries: Entry[] = []
+    try {
+      for (const key of (await $.store.keys()).filter(k => k.startsWith('ledger:'))) {
+        const kept = (await $.store.get(key)) as Kept | undefined
+        if (kept?.root === root) entries.push(...kept.entries)
+      }
+    } catch (err) {
+      $.ui.log(`dredd: the saved ledgers were not read: ${messageOf(err)}`, { to: 'debug' })
+    }
+    history.set(root, entries)
+  }
+  return mergeEntries(history.get(root)!, await read($, ledger), Number.MAX_SAFE_INTEGER)
 }
 
 /** Deletes the oldest kept sessions, leaving room for one more. */
@@ -308,9 +391,19 @@ const record = async (
   return entries
 }
 
-/** Writes a hold's outcome onto its ledger entries. */
-const decide = async ($: EngineInterface, ids: string[], decision: 'proceed' | 'cancel') => {
-  await update($, ledger, list => list.map(x => (ids.includes(x.id) ? { ...x, decision } : x)))
+/**
+ * Writes a hold's outcome onto its ledger entries: Cancel leaves a cancelled
+ * violation, Allow once an allowed one, and Not a violation turns the entries
+ * into misjudged ones, which the command then runs under.
+ */
+const decide = async ($: EngineInterface, ids: string[], answer: Answer3) => {
+  const change = (x: Entry): Entry =>
+    answer === 'cancel'
+      ? { ...x, decision: 'cancelled' }
+      : answer === 'allow'
+        ? { ...x, decision: 'allowed' }
+        : { ...x, verdict: 'misjudged', decision: 'allowed' }
+  await update($, ledger, list => list.map(x => (ids.includes(x.id) ? change(x) : x)))
   dirty.add(await $.session.id())
   flushTimer?.cancel()
   flushTimer = $.clock.after(2000, () => void flush($))
@@ -382,33 +475,44 @@ const ruleDocs = async ($: EngineInterface, root: string) => {
   return docs.join('\n\n')
 }
 
-/** The rule Dredd enforces on its own rules file: no tool call changes it without a person. */
-const GUARD = {
-  id: 'dredd-rules-file',
-  rule: "Changes to Dredd's own rules file (.claude/dredd-rules.json) need a person's approval.",
-  p: 1,
-}
-
 /**
- * Whether a command or path names Dredd's rules file, read the way a shell
- * would: through quotes and backslashes, and through a glob that could
- * expand to it. A second line of defence: the rules a session enforces are
- * pinned at its start, so a change that gets past this has no effect anyway.
+ * Compares the rule docs and the rules file with what `/dredd-rules` saved
+ * when it last wrote the file, and sets the band's warning: the docs changed
+ * (the rules are out of date), or the file changed outside `/dredd-rules`.
+ * Silent when this project's rules file was never drafted here. It only
+ * reads local files; nothing is sent anywhere.
  */
-const namesRulesFile = (text: string) => {
-  const plain = text.replace(/["'`\\]/g, '')
-  return /dredd[-_]?rules/i.test(plain) || /dredd[-_]?r[^\s/]{0,4}[*?[]/i.test(plain)
+const checkDrift = async ($: EngineInterface) => {
+  try {
+    const root = await $.session.root()
+    const drafted = (await $.store.get(`drafted:${root}`)) as Drafted | undefined
+    let note = ''
+    if (drafted !== undefined) {
+      const path = `${root}/${RULES_PATH}`
+      const file = (await $.fs.exists(path)) ? hashText(await $.fs.read(path)) : ''
+      const notes = [
+        hashText(await ruleDocs($, root)) !== drafted.docs ? 'rule docs changed since /dredd-rules: run it again' : '',
+        file !== drafted.rules ? 'rules file changed outside /dredd-rules' : '',
+      ]
+      note = notes.filter(Boolean).join(' · ')
+    }
+    if ((await read($, drift)) !== note) await update($, drift, () => note)
+  } catch (err) {
+    $.ui.log(`dredd: could not compare the rules with the rule docs: ${messageOf(err)}`, { to: 'debug' })
+  }
 }
 
 /** What a hold shows and records. */
 type HoldSpec = { id: string; rule: string; p: number; entryIds: string[]; subject: string }
 
 /**
- * Holds a call in the pane until a person presses Proceed or Cancel, then
- * runs it or refuses it. The wait polls with `sleep`, which costs none of
- * the hook's budget; where no `sleep` can run it asks in the engine's
- * dialog. With no surface to draw on, or once the hold has begun and the
- * hook fails, the call is refused, never run.
+ * Holds a call in the pane until a person answers Cancel, Allow once or Not
+ * a violation, then refuses it or runs it. The wait polls with `sleep`, which costs none of
+ * the hook's budget. Where the pane cannot be shown (a terminal too narrow
+ * to seat it unasked) or no `sleep` can run, it asks in the engine's dialog
+ * instead, which no other mod's band can cover. With no surface to draw on,
+ * or once the hold has begun and the hook fails, the call is refused, never
+ * run.
  */
 const holdFor = async <T,>(
   $: EngineInterface,
@@ -436,28 +540,36 @@ const holdFor = async <T,>(
     subject: hold.subject,
   }
   await update($, held, list => [...list, item])
-  void $.ui.open({ id: PANE, title: 'Dredd', focus: true })
+  const opened = await openPane($, true)
 
-  let decision: 'proceed' | 'cancel' = 'cancel'
+  let decision: Answer3 = 'cancel'
   let why = 'The user refused it.'
-  try {
-    while (!signal.aborted) {
-      const chosen = decisions.get(item.id)
-      if (chosen !== undefined) {
-        decision = chosen
-        break
-      }
-      await $.process.run(['sleep', '0.25'])
-    }
-  } catch {
+  const askInDialog = async () => {
+    await update($, held, list => list.map(x => (x.id === item.id ? { ...x, isAsking: true } : x)))
     try {
       const answer = await $.ui.ask(
-        `Dredd held ${clip(hold.subject, 80)} under rule ${hold.id} (p=${hold.p.toFixed(2)}): ${quoteLine(hold.rule)} Run it?`,
-        { options: ['Proceed', 'Cancel'], header: 'Dredd' },
+        `Dredd held ${clip(hold.subject, 80)} under rule ${hold.id} (p=${hold.p.toFixed(2)}): ${quoteLine(hold.rule)} What should happen?`,
+        { options: ANSWERS.map(([, label]) => label), header: 'Dredd' },
       )
-      decision = answer === 'Proceed' ? 'proceed' : 'cancel'
+      decision = ANSWERS.find(([, label]) => label === answer)?.[0] ?? 'cancel'
     } catch {
       why = 'Dredd could not ask anyone to approve it here, so it did not run.'
+    }
+  }
+  if (!opened.isPlaced) {
+    await askInDialog()
+  } else {
+    try {
+      while (!signal.aborted) {
+        const chosen = decisions.get(item.id)
+        if (chosen !== undefined) {
+          decision = chosen
+          break
+        }
+        await $.process.run(['sleep', '0.25'])
+      }
+    } catch {
+      await askInDialog()
     }
   }
   if (signal.aborted) why = 'The hold was interrupted, so it did not run.'
@@ -465,7 +577,7 @@ const holdFor = async <T,>(
   await update($, held, list => list.filter(x => x.id !== item.id))
   await decide($, hold.entryIds, decision)
   failClosed.delete(toolUseId)
-  return decision === 'proceed' ? run() : refuse(why)
+  return decision === 'cancel' ? refuse(why) : run()
 }
 
 export const register: Register = on => {
@@ -481,6 +593,7 @@ export const register: Register = on => {
     })
     await update($, onFor, () => null)
     await loadRules($)
+    await checkDrift($)
     return next(e)
   })
 
@@ -497,11 +610,6 @@ export const register: Register = on => {
       e.tool,
       command === null ? JSON.stringify(redactValue(JSON.parse(raw))) : redact(command),
     )
-
-    if (namesRulesFile(raw)) {
-      const [entry] = await record($, [{ source: 'monitor', verdict: 'held', subject, ruleId: GUARD.id, p: 1 }])
-      return holdFor($, e.tool_use_id, next.signal, { ...GUARD, entryIds: [entry!.id], subject }, () => next(e))
-    }
 
     const key = await $.env.get("TYPESAFE_API_KEY")
     if (key === undefined || key === '') {
@@ -551,7 +659,7 @@ export const register: Register = on => {
     const entries = await record($, [
       ...found.map(f => ({
         source: 'monitor' as const,
-        verdict: f.band === 'hold' ? ('held' as const) : ('citation' as const),
+        verdict: f.band === 'hold' ? ('violation' as const) : ('citation' as const),
         subject,
         ruleId: f.rule.id,
         p: f.p,
@@ -566,7 +674,7 @@ export const register: Register = on => {
     ])
     const top = found[0]
     if (top === undefined || top.band !== 'hold') return next(e)
-    const entryIds = entries.filter(x => x.verdict === 'held').map(x => x.id)
+    const entryIds = entries.filter(x => x.verdict === 'violation').map(x => x.id)
     return holdFor($, e.tool_use_id, next.signal, { id: top.rule.id, rule: top.rule.rule, p: top.p, entryIds, subject }, () =>
       next(e),
     )
@@ -578,29 +686,25 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('tool.call', { tool: ['Edit', 'Write'] }, async ($, e, next) => {
-    if (!(await isMonitorOn($)) || !namesRulesFile(e.file_path)) return next(e)
-    const subject = `${e.tool} ${e.file_path}`
-    const [entry] = await record($, [{ source: 'monitor', verdict: 'held', subject, ruleId: GUARD.id, p: 1 }])
-    return holdFor($, e.tool_use_id, next.signal, { ...GUARD, entryIds: [entry!.id], subject }, () => next(e))
-  }).catch(async ($, e) => {
-    failClosed.delete(e.tool_use_id)
-    return { deny: 'Dredd guards its own rules file and failed while holding this edit, so it did not run.' }
-  })
-
   on('command.run', { command: 'dredd-rules' }, async ($, e) => {
     if (e.origin.kind !== 'composer') return typedOnly('dredd-rules')
     const root = await $.session.root()
     const path = `${root}/${RULES_PATH}`
-    if (await $.fs.exists(path)) {
-      return { text: `${RULES_PATH} already exists. Dredd never overwrites rules you reviewed; delete it to draft again.` }
-    }
     const docs = await ruleDocs($, root)
     if (docs === '') return { text: 'Found no CLAUDE.md or .claude/rules/*.md to draft rules from.' }
+    const before = (await $.fs.exists(path)) ? await $.fs.read(path) : null
+    let current: Rule[] | undefined
+    if (before !== null) {
+      try {
+        current = parseRules(JSON.parse(before))
+      } catch {
+        current = []
+      }
+    }
     const reply = await $.model.complete({
       model: 'opus',
       system: DRAFT_SYSTEM,
-      prompt: draftPrompt(docs),
+      prompt: draftPrompt(docs, current),
       maxTokens: 8000,
       timeoutMs: 180_000,
     })
@@ -614,11 +718,38 @@ export const register: Register = on => {
     if (rules.length === 0) {
       return { text: 'The model found no rule it could turn into a question. Nothing was written.' }
     }
-    await $.fs.write(path, `${JSON.stringify(rules, null, 2)}\n`)
+    const text = `${JSON.stringify(rules, null, 2)}\n`
+    const save = async (written: string) => {
+      const drafted: Drafted = { docs: hashText(docs), rules: hashText(written) }
+      await $.store.set(`drafted:${root}`, drafted)
+      await update($, drift, () => '')
+    }
+    const review = 'Review it before relying on Dredd: check that each question reads literally, which rules are hard, and what each applies to.'
+    if (before === null || current === undefined) {
+      await $.fs.write(path, text)
+      await save(text)
+      return { text: `Drafted ${rules.length} rules into ${RULES_PATH}. ${review}` }
+    }
+    const summary = describeChanges(ruleChanges(current, rules))
+    if (summary === '') {
+      await save(before)
+      return { text: `No rule changed: ${RULES_PATH} already matches the rule docs, and was left as it is.` }
+    }
+    let answer: string
+    try {
+      answer = await $.ui.ask(`Replace ${RULES_PATH}? The redraft ${summary}.`, {
+        options: ['Replace', 'Keep the current file'],
+        header: 'Dredd',
+      })
+    } catch {
+      return { text: `The redraft ${summary}. Nobody answered, so nothing was written.` }
+    }
+    if (answer !== 'Replace') return { text: `Kept ${RULES_PATH}. The redraft would have ${summary}.` }
+    await $.fs.write(`${path}.bak`, before)
+    await $.fs.write(path, text)
+    await save(text)
     return {
-      text:
-        `Drafted ${rules.length} rules into ${RULES_PATH}. Review it before relying on Dredd: ` +
-        'check that each question reads literally, which rules are hard, and what each applies to.',
+      text: `Replaced ${RULES_PATH}: ${summary}. The old file is ${RULES_PATH}.bak. ${review} The new rules apply from the next session.`,
     }
   })
 
@@ -695,6 +826,11 @@ export const register: Register = on => {
     return { text }
   })
 
+  on('ui.close', async ($, e, next) => {
+    await next(e)
+    if (e.id === PANE) await update($, isLedgerOpen, () => false)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const waiting = await read($, held)
@@ -702,7 +838,7 @@ export const register: Register = on => {
     if (first !== undefined) {
       return (
         <Box flexDirection="column">
-          <Text color="yellow" bold>⚠ Dredd · hard rule {first.ruleId}</Text>
+          <Text color="yellow" bold>⚠ Dredd · likely violation of hard rule {first.ruleId}</Text>
           <Box>
             <Text dimColor>Command  </Text>
             <Text bold>{first.subject}</Text>
@@ -717,25 +853,39 @@ export const register: Register = on => {
           </Box>
           {waiting.length > 1 && <Text dimColor>{waiting.length - 1} more held after this one</Text>}
           <Box>
-            <Button key="proceed" label="1: Proceed" hotkey="1" onPress={() => decisions.set(first.id, 'proceed')} />
-            <Text> </Text>
-            <Button key="cancel" label="2: Cancel" hotkey="2" onPress={() => decisions.set(first.id, 'cancel')} />
-            <Text dimColor>  Claude is waiting on your answer</Text>
+            {ANSWERS.map(([answer, label], i) => (
+              <Box key={answer}>
+                <Button key={answer} label={`${i + 1}: ${label}`} hotkey={String(i + 1)} onPress={() => decisions.set(first.id, answer)} />
+                <Text> </Text>
+              </Box>
+            ))}
+            <Text dimColor> Claude is waiting on your answer</Text>
           </Box>
         </Box>
       )
     }
 
-    const session = await $.session.id()
-    const list = (await read($, ledger)).filter(x => x.session === session)
+    const list = await sessionLedger($)
     const c = counts(list)
-    const room = Math.max(1, e.props.scroll.bodyRows - 2)
-    const colors = { held: 'yellow', violation: 'red', citation: 'cyan', unchecked: 'gray' } as const
+    const tallies = ruleSummary(await projectLedger($))
+    const room = Math.max(1, e.props.scroll.bodyRows - 3 - tallies.length)
+    const colors = { violation: 'red', misjudged: 'yellow', citation: 'cyan', unchecked: 'gray' } as const
+    const width = Math.max(20, e.props.bodyColumns - 1)
     return (
       <Box flexDirection="column">
         <Text bold>
-          ⚖ Ledger · {c.held} held · {c.violations} violations · {c.citations} citations · {c.unchecked} unchecked
+          ⚖ Ledger · {c.violations} violations ({c.allowed} allowed) · {c.misjudged} misjudged · {c.citations} citations ·{' '}
+          {c.unchecked} unchecked
         </Text>
+        {tallies.length > 0 && <Text dimColor>Rules in this project, all sessions:</Text>}
+        {tallies.map(r => (
+          <Text color={r.hint === '' ? undefined : 'yellow'}>
+            {clip(
+              `  ${r.ruleId}  ${r.violations} violations (${r.allowed} allowed) · ${r.misjudged} misjudged${r.hint === '' ? '' : `  ← ${r.hint}`}`,
+              width,
+            )}
+          </Text>
+        ))}
         {list.length === 0 && <Text dimColor>Nothing cited this session.</Text>}
         {list.slice(-room).map(x => (
           <Text color={colors[x.verdict]}>
@@ -750,7 +900,7 @@ export const register: Register = on => {
               ]
                 .filter(part => part !== '')
                 .join('  '),
-              Math.max(20, e.props.bodyColumns - 1),
+              width,
             )}
           </Text>
         ))}
@@ -762,10 +912,12 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const why = await read($, notice)
+    const warning = await read($, drift)
     const waiting = await read($, held)
     const session = await $.session.id()
     const isEnabled = (await read($, onFor)) === session
-    const c = counts((await read($, ledger)).filter(x => x.session === session))
+    const isPaneOpen = await read($, isLedgerOpen)
+    const c = counts(await sessionLedger($))
     const first = waiting[0]
     const below = await next(e)
     return (
@@ -773,11 +925,26 @@ export const register: Register = on => {
         {first !== undefined && (
           <Box>
             <Text color="yellow" bold>
-              ⚠ Dredd held {clip(first.subject, 60)} · rule {first.ruleId} (p={first.p.toFixed(2)}){' '}
+              ⚠ Dredd held {clip(first.subject, 50)} · rule {first.ruleId} (p={first.p.toFixed(2)}){' '}
             </Text>
-            <Button key="band-proceed" label="Proceed" onPress={() => decisions.set(first.id, 'proceed')} />
-            <Text> </Text>
-            <Button key="band-cancel" label="Cancel" onPress={() => decisions.set(first.id, 'cancel')} />
+            {first.isAsking === true ? (
+              <Text dimColor>answer in the dialog</Text>
+            ) : (
+              <Box>
+                {ANSWERS.map(([answer, label], i) => (
+                  <Box key={answer}>
+                    <Button
+                      key={`band-${answer}`}
+                      label={label}
+                      hotkey={String(i + 1)}
+                      plain
+                      onPress={() => decisions.set(first.id, answer)}
+                    />
+                    <Text>  </Text>
+                  </Box>
+                ))}
+              </Box>
+            )}
           </Box>
         )}
         <Box>
@@ -785,17 +952,24 @@ export const register: Register = on => {
             ⚖ Dredd {isEnabled ? 'ON' : 'OFF'}
           </Text>
           <Text dimColor>
-            {' '}· {c.held} held · {c.violations} violations · {c.citations} citations
+            {' '}· {c.violations} violations · {c.citations} citations
             {c.unchecked > 0 ? ` · ${c.unchecked} unchecked` : ''}
             {why !== '' ? ` · ${why}` : ''}{' '}
           </Text>
+          {warning !== '' && <Text color="yellow">⚠ {warning} </Text>}
           <Button
             key="toggle"
             label={isEnabled ? 'Turn off' : 'Turn on'}
+            hotkey="d"
             onPress={() => update($, onFor, value => (value === session ? null : session))}
           />
           <Text> </Text>
-          <Button key="ledger" label="Ledger" onPress={() => void $.ui.open({ id: PANE, title: 'Dredd' })} />
+          <Button
+            key="ledger"
+            label={isPaneOpen ? 'Hide ledger' : 'Ledger'}
+            hotkey="l"
+            onPress={() => (isPaneOpen ? closePane($) : openPane($))}
+          />
         </Box>
         {below}
       </Box>

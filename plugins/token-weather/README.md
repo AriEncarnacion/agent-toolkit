@@ -49,7 +49,7 @@ plugins/token-weather/
 The module registers two hooks:
 
 - **`turn.complete`** reads `$.session.usage()` and appends `{ tokens, window }` to a 12-reading history kept in `$.state`, so it survives hot reloads.
-- **`ui.render` on `AbovePrompt`** reads the history and draws the line from `$.ui.resolve(e)`'s `Box` and `Text`. It returns `next(e)`, drawing nothing, when there is no history yet or a survey holds the band.
+- **`ui.render` on `AbovePrompt`** reads the history and draws the line from `$.ui.resolve(e)`'s `Box` and `Text`. It draws its line above `next(e)`, so the bands of other mods still show beneath it, and returns `next(e)` alone when there is no history yet or a survey holds the band.
 
 ## Tests
 
@@ -57,6 +57,6 @@ The module registers two hooks:
 claude plugin test plugins/token-weather
 ```
 
-`tests/band.test.tsx` answers `session.usage` with fixed readings, raises `turn.complete` through the engine, then mounts `AbovePrompt` on the terminal and desktop surfaces and checks the drawn line. It also covers the survey and zero-window cases. `tests/forecast.test.ts` covers the weather bands, number formatting, the sunrise reading and the drop after a compaction.
+`tests/band.test.tsx` answers `session.usage` with fixed readings, raises `turn.complete` through the engine, then mounts `AbovePrompt` on the terminal and desktop surfaces and checks the drawn line. It also covers the survey and zero-window cases, and that another mod's band still draws beneath the line. `tests/forecast.test.ts` covers the weather bands, number formatting, the sunrise reading and the drop after a compaction.
 
 To type-check on a machine where Claude Code has loaded the mod: `npx tsc -p plugins/token-weather`.

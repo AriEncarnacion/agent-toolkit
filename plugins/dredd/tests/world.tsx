@@ -87,7 +87,8 @@ export type WorldOptions = {
   isSlow?: boolean
   surfaces?: ('terminal' | 'desktop')[]
   canSleep?: boolean
-  ask?: () => string
+  isPaneShown?: boolean
+  ask?: () => string | Promise<string>
   links?: Record<string, string>
   env?: Record<string, string>
   files?: Record<string, string>
@@ -174,10 +175,17 @@ export const world = (on: On, options: WorldOptions = {}) => {
 
   let opened = 0
   let onOpen = () => {}
-  on('ui.open', () => {
+  const panes = new Set<string>()
+  on('ui.open', ($, e) => {
     opened += 1
     onOpen()
-    return { value: { isPlaced: true } }
+    if (options.isPaneShown === false) return { value: { isPlaced: false as const, reason: 'narrow' as const } }
+    panes.add(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', ($, e) => {
+    panes.delete(e.id)
+    return { value: undefined }
   })
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
@@ -185,12 +193,12 @@ export const world = (on: On, options: WorldOptions = {}) => {
   })
 
   const ran: string[] = []
-  on('tool.call', ($, e) => {
+  on('tool.call', async ($, e) => {
     if (e.tool === 'AskUserQuestion') {
       const question = e.questions[0]?.question ?? ''
       asked.push(question)
       if (options.ask === undefined) return { deny: 'no one to ask' }
-      return { result: { questions: e.questions, answers: { [question]: options.ask() } } }
+      return { result: { questions: e.questions, answers: { [question]: await options.ask() } } }
     }
     ran.push(e.tool)
     return { result: 'ran' }

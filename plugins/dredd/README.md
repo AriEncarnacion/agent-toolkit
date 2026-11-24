@@ -4,16 +4,18 @@ CLAUDE.md is read once, at the start of a session. As the context grows, agents 
 
 Dredd has two parts that share one ledger:
 
-- **Monitor (live).** It checks every Bash command, every shell command run through the `Monitor` tool, and every MCP tool call before it runs, including calls made by subagents. A command that likely breaks a **hard** rule is held in the Dredd pane until you press `1: Proceed` or `2: Cancel`. A command that might break a rule is **cited**, which records it without stopping it. Everything else runs untouched. File edits are never checked live, so they stay fast; the one exception is an edit of Dredd's own rules file (see Usage).
+- **Monitor (live).** It checks every Bash command, every shell command run through the `Monitor` tool, and every MCP tool call before it runs, including calls made by subagents. A command that likely breaks a **hard** rule is a **violation**: it is held in the Dredd pane until you answer `1: Cancel`, `2: Allow once` or `3: Not a violation`. A command that might break a rule is **cited**, which records it without stopping it. Everything else runs untouched. File edits are never checked live, so they stay fast.
 - **Review (on demand).** `/dredd-review` checks this branch's diff against the code rules in batched Jev requests. Each finding points at its `file:line`. Violations of hard rules start a turn telling the agent to fix them. `/dredd-review <PR#>` reviews a PR's diff and posts the findings as one PR comment.
 
-Every held command, violation and citation goes into the session's **ledger**. The ledger shows in the Dredd pane and is counted in the band above the prompt:
+Every rule Dredd enforces comes from `.claude/dredd-rules.json`, drafted from your CLAUDE.md and `.claude/rules/*.md`. Dredd has no rules of its own.
+
+A **violation** is the model acting against a rule that was present: a held command, or a hard-rule line in a reviewed diff. Every violation and citation goes into the session's **ledger**. The ledger shows in the Dredd pane and is counted in the band above the prompt:
 
 ```
-⚖ Dredd OFF · 0 held · 0 violations · 0 citations   [Turn on] [Ledger]
+⚖ Dredd OFF · 0 violations · 0 citations   [Turn on] [Ledger]
 ```
 
-The ledger starts empty in each session. Each session's ledger is also kept, so you can see which rules get broken most often and improve CLAUDE.md over time.
+A new session's ledger starts empty; a resumed one (`claude --continue`, `--resume` or `/resume`) shows the entries it saved before. Each session's ledger is kept, so you can see which rules get broken most often and improve CLAUDE.md over time.
 
 Built against Claude Code 2.1.290.
 
@@ -29,7 +31,7 @@ Run this inside each personal project that should use Dredd, never once for ever
 Dredd sends what it checks to TypeSafe (see [Data sent to TypeSafe](#data-sent-to-typesafe)), so three gates keep it to the projects and the moments you choose:
 
 1. **Local install.** `--scope local` installs Dredd for this project on this machine only. Claude Code loads plugins per machine and scope, not per account, so a user-scope install would also load in every other project on the machine, including work projects opened while a work account is logged in.
-2. **Off at the start of every session.** The band shows `⚖ Dredd OFF` until you press **Turn on**. While it is off, Monitor sends nothing to Jev and holds nothing, including the guard on its own rules file. The ON state is tied to the session it was turned on in, so each new session, `/clear` and resume included, starts off.
+2. **Off at the start of every session.** The band shows `⚖ Dredd OFF` until you press **Turn on**. While it is off, Monitor sends nothing to Jev and holds nothing. The ON state is tied to the session it was turned on in, so each new session, `/clear` and resume included, starts off.
 3. **Typed-only commands.** `/dredd-review` and `/dredd-rules` run only when you type them at the prompt. When an agent, a skill or another plugin runs them, Dredd refuses with one line. Typing `/dredd-review` is itself the go-ahead, so it runs whether or not the band says ON.
 
 ## Setup
@@ -38,8 +40,10 @@ Dredd sends what it checks to TypeSafe (see [Data sent to TypeSafe](#data-sent-t
    ```
    export TYPESAFE_API_KEY=...
    ```
-2. Run `/dredd-rules` in the project. It reads `CLAUDE.md` and `.claude/rules/*.md`, asks a model once to draft `.claude/dredd-rules.json`, and writes that file. It never overwrites an existing rules file; delete the file to draft again.
+2. Run `/dredd-rules` in the project. It reads `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` and `.claude/rules/*.md`, asks a model once to draft `.claude/dredd-rules.json`, and writes that file. When the file already exists, see [Keeping the rules current](#keeping-the-rules-current).
 3. **Review the file before relying on it.** Jev reads questions literally, so check that each question names the concrete thing to look for, that only absolute rules are `hard`, and that `applies` is right. Commit the file with the project.
+
+The Claude desktop app does not inherit variables from a terminal, so there, put the key in the `env` block of the project's `.claude/settings.local.json` and keep that file out of git.
 
 Then press **Turn on** in the band. Until there is a key and a rules file, Monitor lets every command through, and the band says which of the two is missing.
 
@@ -71,26 +75,41 @@ How Jev's probability that a rule is broken turns into a verdict:
 
 | Probability | Hard rule | Soft rule |
 | --- | --- | --- |
-| 0.70 or more | held (Monitor) or violation (Review) | citation |
+| 0.70 or more | violation: held (Monitor) or reported (Review) | citation |
 | 0.30 to 0.70 | citation | citation |
 | below 0.30 | runs or passes | runs or passes |
 
 ## Usage
 
-- **A held command.** The Dredd pane opens with the command, the rule and the probability. Press `1` to proceed or `2` to cancel. A cancel refuses the command, and the agent sees the rule in the refusal. The pane only seats unasked in a terminal 144 columns or wider. In a narrower terminal the band shows the held command with **Proceed** and **Cancel** buttons. Pressing Esc while a command is held also refuses it. Where Dredd cannot run its `sleep` wait (native Windows has no `sleep` program), the hold asks in Claude Code's own question dialog instead. In a session that draws on no screen at all (`claude -p`), a hold refuses the command straight away. If Dredd itself fails after a command was held, it refuses the command rather than running it.
-- **The band.** It shows the session's counts. **Turn on** starts Monitor and **Turn off** stops it; only a person can press them. Review runs whenever you type it. **Ledger** opens the pane.
-- **The pane.** It lists the session's ledger, newest last: time, verdict, rule, probability, the decision on a hold, and the command or `file:line`.
+- **A held command.** The Dredd pane opens with the command, the rule and the probability. Answer one of three:
+  - `1: Cancel`: the command is refused and the agent sees the rule in the refusal. Recorded as a violation, `cancelled`.
+  - `2: Allow once`: the command runs. Recorded as a violation, `allowed`: the model still acted against the rule as written.
+  - `3: Not a violation`: Jev misjudged it, so the command runs. Recorded as `misjudged` against the rule, and not counted as a violation.
+
+   The pane only seats unasked in a terminal 144 columns or wider. In a narrower terminal the hold is asked in Claude Code's own question dialog instead, which no other mod's band can cover, and the band says to answer there. Pressing Esc while a command is held also refuses it, as a cancelled violation. Where Dredd cannot run its `sleep` wait (native Windows has no `sleep` program), the hold asks in Claude Code's own question dialog instead. In a session that draws on no screen at all (`claude -p`), a hold refuses the command straight away. If Dredd itself fails after a command was held, it refuses the command rather than running it.
+- **The band.** It shows the session's violations and citations, and a yellow warning when the rules may be out of date. **Turn on** starts Monitor and **Turn off** stops it; only a person can press them. Review runs whenever you type it. **Ledger** opens the pane, and pressed again (**Hide ledger**) closes it. It draws above any band rows of mods after it in the chain.
+- **Hotkeys.** While a command is held in the band, type `1` (Cancel), `2` (Allow once) or `3` (Not a violation) into an empty prompt. Otherwise press `ctrl+x tab` to focus the band, then `d` to turn Dredd on or off and `l` to open or close the ledger. In the pane, `1`, `2` and `3` answer a hold.
+- **The pane.** It starts with a per-rule summary over every saved session in this project: each rule's violations, how many you allowed, and how many you marked misjudged. A rule allowed in at least half its violations (twice or more) is flagged `often allowed: soften the rule or add the exception to CLAUDE.md`: a hard rule you keep letting through does not match what you actually want. A rule misjudged at least as often as it is broken (twice or more) is flagged `often misjudged: reword the question`. Below that it lists the session's ledger, newest last: time, verdict, rule, probability, `cancelled` or `allowed`, and the command or `file:line`.
 - **`/dredd-review`** reviews `git diff --merge-base origin/HEAD` (or `origin/main` when `origin/HEAD` is unset), which includes uncommitted changes, plus every untracked file git does not ignore. It runs git with `--no-ext-diff --no-color` and fixed `a/` `b/` prefixes, so your diff settings do not change what it reads. **`/dredd-review 123`** reviews PR #123 through `gh` and comments on it. A PR review does not start a fix turn, because the PR may not be the branch you have checked out.
 - **Long commands.** A command over about 24,000 characters (after redaction) is sent in overlapping windows, one request each, and each rule takes its highest probability across them. Every window is checked, so a dangerous line hidden in the middle of a huge heredoc is still seen.
-- **Dredd guards its own rules file.** The rules a session enforces are pinned when the session starts (or when it first finds a rules file), so no later change to the file, by an edit, a deletion or a shell glob, affects that session: an agent cannot weaken the rules it is judged by. Your own edits take effect in the next session, and the band says when the file has changed. On top of that, an `Edit` or `Write` of `.claude/dredd-rules.json`, or any command that names it (through quotes, backslashes or a glob too), is held for a person without asking Jev.
+- **A session keeps the rules it started with.** The rules a session enforces are pinned when the session starts (or when it first finds a rules file), so no later change to the file, by an edit, a deletion or a shell glob, affects that session: an agent cannot weaken the rules it is judged by mid-session. Your own edits take effect in the next session, and the band says when the file has changed. Dredd holds nothing on its own: to stop agents editing the rules file at all, write that rule in CLAUDE.md and run `/dredd-rules`.
 - **Failures.** If Jev does not answer within 3 seconds, returns an error, or leaves a rule unanswered, the command runs and the ledger records it as `unchecked`. A diff over 4 MiB is not reviewed at all, rather than partly.
+
+## Keeping the rules current
+
+When `/dredd-rules` writes the rules file, it saves a fingerprint of the rule docs and of the file it wrote. At the start of each session Dredd compares them and the band warns:
+
+- `rule docs changed since /dredd-rules: run it again`: CLAUDE.md or a `.claude/rules/*.md` file changed, so the rules may be out of date.
+- `rules file changed outside /dredd-rules`: the file was edited by hand or by an agent. Your own tuning triggers this too, until the next `/dredd-rules`.
+
+Run `/dredd-rules` again to bring the file up to date. It gives the model the current file and asks it to keep every rule whose text is unchanged exactly as it is, id and tuned question included. It then shows which rules the redraft adds, removes and changes, and asks before replacing the file. The old file is kept as `.claude/dredd-rules.json.bak`. If no rule changed, it leaves the file alone. The new rules apply from the next session. This only reads local files; nothing is sent to TypeSafe.
 
 ## Capabilities
 
 - `$.http`: posts each check to Jev at `https://api.typesafe.ai/v1/systemone`. The section below says what is sent.
 - `$.env`: reads `TYPESAFE_API_KEY`, and `TMPDIR` to know which temp folder scripts may be read from.
 - `$.process`: runs `git rev-parse`, `git diff`, `git ls-files` and `git diff --no-index` (for untracked files) for a local review; `gh pr diff` and `gh pr comment` for a PR review; and `sleep 0.25` in a loop while a command is held. A hook's own wait counts against its 10-second budget, and a `$.process` wait does not.
-- `$.fs`: reads `CLAUDE.md`, `.claude/rules/*.md` and `.claude/dredd-rules.json` from the project root, the project scripts a checked command names (see Data sent to TypeSafe for the allow-list), and writes `.claude/dredd-rules.json` when `/dredd-rules` drafts it.
+- `$.fs`: reads `CLAUDE.md`, `.claude/rules/*.md` and `.claude/dredd-rules.json` from the project root, the project scripts a checked command names (see Data sent to TypeSafe for the allow-list), and writes `.claude/dredd-rules.json` (and `.claude/dredd-rules.json.bak` on a redraft) when `/dredd-rules` drafts it.
 
 Dredd also calls `$.model` once per `/dredd-rules` run (Opus). It keeps each session's ledger in `$.store`: the newest 50 sessions, under 3 MiB in all.
 
@@ -146,15 +165,16 @@ plugins/dredd/
   hooks/hooks.json             — { "modules": ["./register.tsx"] }
   hooks/register.tsx           — the hooks: Monitor, the two commands, the ledger, the pane and the band
   hooks/dredd.ts               — pure logic: redaction, Jev requests, bands, diff chunking, rule validation
-  types/index.d.ts             — PluginState contract: onFor, ledger, held, notice, pinned
+  types/index.d.ts             — PluginState contract: onFor, ledger, held, notice, pinned, isLedgerOpen, drift
   tests/                       — unit and engine tests; world.tsx is the mocked engine they share
   tsconfig.json                — extends the types Claude Code writes on load
 ```
 
-- **`tool.call` on `Bash`, `Monitor` and `/^mcp__/`, and on `Edit` and `Write` of the rules file.** It redacts the input, then splits it into windows if it is long. It sends one Jev request per window with one Noul question per command rule plus a `_kind` Choice (read-only, write, deploy, destructive, network or other), racing the request against a 3-second timer. Flagged rules go in the ledger. On a hold, the hook adds the command to `held` in `$.state`, opens the pane, and waits for a button press. The wait is a loop of `sleep 0.25` runs, so it costs none of the hook's budget.
-- **`command.run`.** Both commands refuse unless `e.origin.kind` is `composer`, meaning a person typed them. `dredd-review` chunks the redacted diff by file and hunk, keeping each chunk under about 8K tokens and 254 added lines. For each chunk it sends a Noul and a line Choice per code rule, with at most 8 requests in flight and one retry after a 429. `dredd-rules` drafts the rules file with `$.model.complete`.
+- **`tool.call` on `Bash`, `Monitor` and `/^mcp__/`.** It redacts the input, then splits it into windows if it is long. It sends one Jev request per window with one Noul question per command rule plus a `_kind` Choice (read-only, write, deploy, destructive, network or other), racing the request against a 3-second timer. Flagged rules go in the ledger. On a hold, the hook adds the command to `held` in `$.state`, opens the pane, and waits for a button press. The wait is a loop of `sleep 0.25` runs, so it costs none of the hook's budget. When the pane is not placed, it asks with `$.ui.ask` instead.
+- **`command.run`.** Both commands refuse unless `e.origin.kind` is `composer`, meaning a person typed them. `dredd-review` chunks the redacted diff by file and hunk, keeping each chunk under about 8K tokens and 254 added lines. For each chunk it sends a Noul and a line Choice per code rule, with at most 8 requests in flight and one retry after a 429. `dredd-rules` drafts the rules file with `$.model.complete`, and on a redraft asks with `$.ui.ask` before replacing it.
 - **`ui.render`.** The `dredd` Pane draws the hold or the ledger. The `AbovePrompt` band draws the counts and the toggle, which is on only in the session a person turned it on in, followed by whatever other mods draw there.
-- **The ledger.** It lives in `$.state`, and each entry is tagged with its session id. After each change it is saved to `$.store` under `ledger:<session id>`, debounced and on every `turn.complete`. A resumed session merges into what it saved before.
+- **The drift check.** `session.start` hashes the rule docs and the rules file and compares them with the hashes `/dredd-rules` saved in `$.store` under `drafted:<root>`.
+- **The ledger.** It lives in `$.state`, and each entry is tagged with its session id. After each change it is saved to `$.store` under `ledger:<session id>`, debounced and on every `turn.complete`. A resumed session merges into what it saved before, and the pane and band draw the saved entries together with the new ones.
 
 ## Tests
 
@@ -162,8 +182,8 @@ plugins/dredd/
 claude plugin test plugins/dredd
 ```
 
-- **`tests/dredd.test.ts`** covers the pure logic: every redaction pattern, including in diff lines and key blocks cut off before their END; the band edges; the request shapes; diff chunking and its caps; rule validation; and the ledger's merge and pruning.
-- **`tests/monitor.test.tsx`** drives `tool.call` through the engine. It covers a pass, a citation, and a hold answered by Proceed and by Cancel, in the pane on terminal and desktop and in the band. It also covers the non-interactive refusal, MCP redaction, a Jev error and a timeout, Dredd being off at the start of each session and the toggle, a missing key or rules file, and the store's save, resume and pruning.
-- **`tests/review.test.tsx`** covers a local review and its fix turn, a PR review and its comment, the truncated-diff and PR-number guards, `/dredd-rules` drafting, refusing to overwrite, and rejecting a bad draft, and both commands refusing a run a person did not type. A review runs with the band off, because typing it is the go-ahead.
+- **`tests/dredd.test.ts`** covers the pure logic: the per-rule summary and its flags, the redraft diff, the fingerprint, every redaction pattern, including in diff lines and key blocks cut off before their END; the band edges; the request shapes; diff chunking and its caps; rule validation; and the ledger's merge and pruning.
+- **`tests/monitor.test.tsx`** drives `tool.call` through the engine. It covers a pass, a citation, and a hold answered by Cancel, Allow once and Not a violation, with what each records, in the pane on terminal and desktop and in the band. It also covers the non-interactive refusal, MCP redaction, a Jev error and a timeout, Dredd being off at the start of each session and after a `/clear`, the toggle, the band's hotkeys and Ledger open/close, a resumed session's saved ledger, the dialog used when the pane cannot be shown, the per-rule summary across the project's sessions, the drift warnings, touching the rules file being judged like any other command, a missing key or rules file, and the store's save, resume and pruning.
+- **`tests/review.test.tsx`** covers a local review and its fix turn, a PR review and its comment, the truncated-diff and PR-number guards, `/dredd-rules` drafting, a redraft that changes nothing, a redraft replaced or kept after asking, and rejecting a bad draft, and both commands refusing a run a person did not type. A review runs with the band off, because typing it is the go-ahead.
 
 To type-check on a machine where Claude Code has loaded the mod: `npx tsc -p plugins/dredd`.

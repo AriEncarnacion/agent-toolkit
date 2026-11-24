@@ -85,6 +85,9 @@ Mods start at `1.0.0` and follow semver, like every plugin here.
 
 - Keep values that must survive a hot reload in `$.state` (declared in `types/index.d.ts`) or
   `$.store`. A reload runs `register` again, so the module's own variables start over.
+- A hook on the `AbovePrompt` band draws its own rows and then `await next(e)` beneath them.
+  Returning only its own rows hides every band after it in the chain, including a mod that
+  is waiting on the person.
 - Never name a local variable `h` in a module that draws. JSX compiles to calls to a global
   `h`, and a local of that name shadows it: the render hook throws `h is not a function`.
 - CLAUDE.md's comment rules apply to TypeScript: a file-header docstring and `/** */`

@@ -127,7 +127,7 @@ test('a PR argument that is not a number is refused before anything runs', async
   expect(w.argv.length).toBe(0)
 })
 
-test('/dredd-rules drafts the rules file from CLAUDE.md, and never overwrites it', async ($, on) => {
+test('/dredd-rules drafts the rules file from CLAUDE.md, and a rerun with no rule changed leaves it alone', async ($, on) => {
   const w = world(on, { files: { '/repo/CLAUDE.md': '# Rules\n\nAgents must never execute raw_command actions on a lambda.' } })
   delete w.files[RULES_PATH]
   const prompts: string[] = []
@@ -139,12 +139,39 @@ test('/dredd-rules drafts the rules file from CLAUDE.md, and never overwrites it
   const first = await $.command.run(cmd('dredd-rules'))
   expect(first.text).toMatch(/Drafted 3 rules/)
   expect(prompts[0]).toMatch(/never execute raw_command/)
+  expect(prompts[0]).not.toMatch(/already exists/)
   expect(JSON.parse(w.files[RULES_PATH]!)).toEqual(RULES)
+  expect(w.store.has('drafted:/repo')).toBe(true)
 
   const second = await $.command.run(cmd('dredd-rules'))
-  expect(second.text).toMatch(/already exists/)
-  expect(prompts.length).toBe(1)
+  expect(second.text).toMatch(/No rule changed/)
+  expect(prompts[1]).toMatch(/A rules file already exists/)
+  expect(w.asked.length).toBe(0)
+  expect(`${RULES_PATH}.bak` in w.files).toBe(false)
 })
+
+for (const [answer, isReplaced] of [
+  ['Replace', true],
+  ['Keep the current file', false],
+] as const) {
+  test(`/dredd-rules redrafts a changed rule set only after asking: ${answer}`, async ($, on) => {
+    const redraft = [RULES[0]!, { ...RULES[1]!, question: 'Does this command push with --force?' }]
+    const w = world(on, { files: { '/repo/CLAUDE.md': '# Rules' }, ask: () => answer })
+    const before = w.files[RULES_PATH]!
+    on('model.complete', () => ({ value: { isAnswered: true as const, text: JSON.stringify(redraft), usage: USAGE } }))
+    const result = await $.command.run(cmd('dredd-rules'))
+    expect(w.asked[0]).toMatch(/removed service-boundary; changed no-force-push/)
+    if (isReplaced) {
+      expect(JSON.parse(w.files[RULES_PATH]!)).toEqual(redraft)
+      expect(w.files[`${RULES_PATH}.bak`]).toBe(before)
+      expect(result.text).toMatch(/Replaced .*next session/)
+    } else {
+      expect(w.files[RULES_PATH]).toBe(before)
+      expect(`${RULES_PATH}.bak` in w.files).toBe(false)
+      expect(result.text).toMatch(/Kept/)
+    }
+  })
+}
 
 test('/dredd-rules writes nothing when the draft is invalid or the model does not answer', async ($, on) => {
   const w = world(on, { files: { '/repo/CLAUDE.md': '# Rules' } })

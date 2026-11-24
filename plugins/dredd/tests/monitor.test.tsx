@@ -5,6 +5,7 @@
  */
 import { test, expect } from 'claude-code/testing'
 
+import { hashText } from '../hooks/dredd'
 import type { Kept } from '../hooks/dredd'
 import { BAND, PANE, RULES, turnOn, world } from './world'
 
@@ -28,7 +29,7 @@ test('a harmless command runs and the ledger stays empty', async ($, on) => {
   expect(Object.keys(w.sent[0]!.questions).sort()).toEqual(['_kind', 'no-force-push', 'no-lambda-raw'])
 
   const ui = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
-  expect(await ui.find({ type: 'Text', text: /0 held · 0 violations · 0 citations/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0 violations · 0 citations/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -63,11 +64,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = await $.ui.mount({ plugin: 'dredd', surface, ...PANE })
     expect(await pane.find({ type: 'Text', text: /hard rule no-lambda-raw/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /never execute raw_command/ })).toBeDefined()
-    await pane.press({ key: 'proceed' })
+    await pane.press({ key: 'allow' })
     await w.clock.advance(250)
     await call
     expect(w.ran).toEqual(['Bash'])
-    expect(await pane.find({ type: 'Text', text: /held\s+no-lambda-raw\s+0\.86\s+proceed/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /violation\s+no-lambda-raw\s+0\.86\s+allowed/ })).toBeDefined()
     await pane.unmount()
   })
 }
@@ -95,7 +96,10 @@ test('the band carries the held prompt when the pane is not seated', async ($, o
   await shown
   const band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
   expect(await band.find({ type: 'Text', text: /Dredd held aws lambda invoke/ })).toBeDefined()
-  await band.press({ key: 'band-proceed' })
+  expect((await band.find({ type: 'Button', key: 'band-cancel' }))?.props.hotkey).toBe('1')
+  expect((await band.find({ type: 'Button', key: 'band-allow' }))?.props.hotkey).toBe('2')
+  expect((await band.find({ type: 'Button', key: 'band-misjudged' }))?.props.hotkey).toBe('3')
+  await band.press({ key: 'band-allow' })
   await w.clock.advance(250)
   await call
   expect(w.ran).toEqual(['Bash'])
@@ -245,7 +249,7 @@ test('a session that started non-interactive but draws on the desktop still hold
   const call = $.tool.call({ tool: 'Bash', command: LAMBDA })
   await shown
   const pane = await $.ui.mount({ plugin: 'dredd', surface: 'desktop', ...PANE })
-  await pane.press({ key: 'proceed' })
+  await pane.press({ key: 'allow' })
   await w.clock.advance(250)
   await call
   expect(w.ran).toEqual(['Bash'])
@@ -292,28 +296,6 @@ test('a shell command run through the Monitor tool is checked like Bash', async 
   await pane.unmount()
 })
 
-for (const [label, input] of [
-  ['an Edit of', { tool: 'Edit', file_path: '/repo/.claude/dredd-rules.json', old_string: 'a', new_string: 'b' }],
-  ['a Write to', { tool: 'Write', file_path: '/repo/.claude/dredd-rules.json', content: '[]' }],
-  ['a Bash command that deletes', { tool: 'Bash', command: 'rm .claude/dredd-rules.json' }],
-] as const) {
-  test(`${label} Dredd's own rules file is held for a person, with no Jev call`, async ($, on) => {
-    const w = world(on, { env: {} })
-    await turnOn($)
-    const shown = w.nextOpen()
-    const call = $.tool.call(input)
-    await shown
-    const pane = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
-    expect(await pane.find({ type: 'Text', text: /hard rule dredd-rules-file/ })).toBeDefined()
-    await pane.press({ key: 'cancel' })
-    await w.clock.advance(250)
-    expect(textOf(await call)).toMatch(/dredd-rules-file/)
-    expect(w.ran).toEqual([])
-    expect(w.sent.length).toBe(0)
-    await pane.unmount()
-  })
-}
-
 test('an edit to any other file is not held', async ($, on) => {
   const w = world(on)
   await turnOn($)
@@ -338,22 +320,6 @@ for (const [label, change] of [
     const band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
     expect(await band.find({ type: 'Text', text: /this session keeps the rules it started with/ })).toBeDefined()
     await band.unmount()
-  })
-}
-
-for (const command of ["rm .claude/dredd-'rules'.json", 'rm .claude/dredd\\-rules.json', 'cat .claude/dredd-r*.json']) {
-  test(`a command naming the rules file through shell quoting or a glob is held: ${command}`, async ($, on) => {
-    const w = world(on, { env: {} })
-    await turnOn($)
-    const shown = w.nextOpen()
-    const call = $.tool.call({ tool: 'Bash', command })
-    await shown
-    const pane = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
-    await pane.press({ key: 'cancel' })
-    await w.clock.advance(250)
-    expect(textOf(await call)).toMatch(/dredd-rules-file/)
-    expect(w.ran).toEqual([])
-    await pane.unmount()
   })
 }
 
@@ -441,4 +407,117 @@ test('entries made just before the session id changes are still saved under the 
   await w.clock.advance(2000)
   expect((w.store.get('ledger:s1') as Kept).entries.length).toBe(1)
   expect(w.store.has('ledger:s2')).toBe(false)
+})
+
+test('where the pane cannot be shown, a hold asks in the engine dialog and the band says so', async ($, on) => {
+  let bandSaid = false
+  const w = world(on, {
+    answers: HOLD,
+    isPaneShown: false,
+    ask: async () => {
+      const band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
+      bandSaid = (await band.find({ type: 'Text', text: /answer in the dialog/ })) !== undefined
+      await band.unmount()
+      return 'Allow once'
+    },
+  })
+  await turnOn($)
+  await $.tool.call({ tool: 'Bash', command: LAMBDA })
+  expect(w.asked.length).toBe(1)
+  expect(bandSaid).toBe(true)
+  expect(w.ran).toEqual(['Bash'])
+})
+
+test('the band has hotkeys, and the Ledger button opens the pane and, pressed again, closes it', async ($, on) => {
+  world(on)
+  const band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
+  expect((await band.find({ type: 'Button', key: 'toggle' }))?.props.hotkey).toBe('d')
+  expect((await band.find({ type: 'Button', key: 'ledger' }))?.props.hotkey).toBe('l')
+  await band.press({ key: 'ledger' })
+  expect(await band.find({ type: 'Button', key: 'ledger', text: 'Hide ledger' })).toBeDefined()
+  await band.press({ key: 'ledger' })
+  expect(await band.find({ type: 'Button', key: 'ledger', text: 'Ledger' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a resumed session shows the entries it saved before, and a new session starts empty', async ($, on) => {
+  const earlier = { id: 'earlier', at: 1, session: 's1', source: 'monitor', verdict: 'violation', ruleId: 'no-force-push', p: 0.9, decision: 'cancelled', subject: 'git push --force' }
+  const w = world(on, { store: { 'ledger:s1': { startedAt: 1, entries: [earlier] } } })
+  const pane = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
+  expect(await pane.find({ type: 'Text', text: /violation\s+no-force-push\s+0\.90\s+cancelled\s+git push --force/ })).toBeDefined()
+  await pane.unmount()
+  const band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /1 violations/ })).toBeDefined()
+  await band.unmount()
+
+  w.setSession('s2')
+  const fresh = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
+  expect(await fresh.find({ type: 'Text', text: /Nothing cited this session/ })).toBeDefined()
+  await fresh.unmount()
+})
+
+for (const [key, verdict, decision, ran] of [
+  ['cancel', 'violation', 'cancelled', []],
+  ['allow', 'violation', 'allowed', ['Bash']],
+  ['misjudged', 'misjudged', 'allowed', ['Bash']],
+] as const) {
+  test(`answering a hold with ${key} records a ${verdict} that was ${decision}`, async ($, on) => {
+    const w = world(on, { answers: HOLD })
+    await turnOn($)
+    const shown = w.nextOpen()
+    const call = $.tool.call({ tool: 'Bash', command: LAMBDA })
+    await shown
+    const pane = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
+    expect(await pane.find({ type: 'Button', key, text: /^[123]: (Cancel|Allow once|Not a violation)$/ })).toBeDefined()
+    await pane.press({ key })
+    await w.clock.advance(250)
+    await call
+    expect(w.ran).toEqual([...ran])
+    await w.clock.advance(2000)
+    const kept = w.store.get('ledger:s1') as Kept
+    expect(kept.entries.map(e => [e.verdict, e.ruleId, e.decision])).toEqual([[verdict, 'no-lambda-raw', decision]])
+    expect(kept.root).toBe('/repo')
+    await pane.unmount()
+  })
+}
+
+test('the pane sums each rule across the project\'s sessions and flags a rule that is often allowed', async ($, on) => {
+  const old = (id: string, decision: 'allowed' | 'cancelled') =>
+    ({ id, at: 1, session: 'old', source: 'monitor', verdict: 'violation', ruleId: 'no-lambda-raw', p: 0.9, decision, subject: 'x' })
+  world(on, {
+    store: {
+      'ledger:old': { startedAt: 1, root: '/repo', entries: [old('a', 'allowed'), old('b', 'allowed'), old('c', 'cancelled')] },
+      'ledger:elsewhere': { startedAt: 1, root: '/other', entries: [{ ...old('d', 'allowed'), ruleId: 'other-rule' }] },
+    },
+  })
+  const pane = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...PANE })
+  expect(await pane.find({ type: 'Text', text: /no-lambda-raw\s+3 violations \(2 allowed\) · 0 misjudged\s+← often allowed/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /other-rule/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('the band warns when the rule docs or the rules file changed since /dredd-rules wrote it', async ($, on) => {
+  const w = world(on, { files: { '/repo/CLAUDE.md': '# Rules v1' } })
+  w.store.set('drafted:/repo', { docs: hashText('# CLAUDE.md\n\n# Rules v1'), rules: hashText(w.files['/repo/.claude/dredd-rules.json']!) })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  let band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
+  await band.unmount()
+
+  w.files['/repo/CLAUDE.md'] = '# Rules v2'
+  w.files['/repo/.claude/dredd-rules.json'] = '[]'
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  band = await $.ui.mount({ plugin: 'dredd', surface: 'terminal', ...BAND })
+  expect(await band.find({ type: 'Text', text: /rule docs changed since \/dredd-rules: run it again · rules file changed outside \/dredd-rules/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('Dredd has no rules of its own: touching its rules file is judged by Jev like any other command', async ($, on) => {
+  const w = world(on, { answers: PASS })
+  await turnOn($)
+  await $.tool.call({ tool: 'Bash', command: 'cp /tmp/r.json .claude/dredd-rules.json' })
+  await $.tool.call({ tool: 'Write', file_path: '/repo/.claude/dredd-rules.json', content: '[]' })
+  expect(w.ran).toEqual(['Bash', 'Write'])
+  expect(w.opens()).toBe(0)
+  expect(w.sent.length).toBe(1)
 })
